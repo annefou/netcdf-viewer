@@ -1,0 +1,13 @@
+# .dockerignore
+node_modules
+npm-debug.log
+uploads/*
+!uploads/.gitkeep
+.git
+.gitignore
+README.md
+.env
+.nyc_output
+coverage
+.nyc_output
+.coverage

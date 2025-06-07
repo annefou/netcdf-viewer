@@ -1,0 +1,3 @@
+# Aptfile (Heroku system dependencies)
+libnetcdf-dev
+libhdf5-dev

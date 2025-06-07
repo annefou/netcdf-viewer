@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NetCDF Geographic Data Viewer</title>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>🌍 NetCDF Geographic Data Viewer</h1>
+            <p>Professional-grade visualization for climate and weather data</p>
+        </header>
+
+        <!-- Upload Section -->
+        <section class="upload-section">
+            <div class="upload-card">
+                <div class="upload-area" id="uploadArea">
+                    <div class="upload-icon">📁</div>
+                    <h3>Upload NetCDF File</h3>
+                    <p>Drag & drop your .nc file here or click to browse</p>
+                    <input type="file" id="fileInput" accept=".nc" style="display: none;">
+                    <button class="upload-btn" onclick="document.getElementById('fileInput').click()">
+                        Select File
+                    </button>
+                </div>
+                
+                <div class="upload-progress" id="uploadProgress" style="display: none;">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <p id="progressText">Uploading...</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- File Info Section -->
+        <section class="file-info" id="fileInfoSection" style="display: none;">
+            <div class="info-grid">
+                <div class="info-card">
+                    <h3>📊 File Information</h3>
+                    <div class="info-content">
+                        <p><strong>Filename:</strong> <span id="fileName">-</span></p>
+                        <p><strong>Size:</strong> <span id="fileSize">-</span></p>
+                        <p><strong>Dimensions:</strong> <span id="fileDimensions">-</span></p>
+                        <p><strong>Variables:</strong> <span id="fileVariables">-</span></p>
+                    </div>
+                </div>
+                
+                <div class="info-card">
+                    <h3>🌐 Coordinates</h3>
+                    <div class="info-content">
+                        <p><strong>Latitude:</strong> <span id="latRange">-</span></p>
+                        <p><strong>Longitude:</strong> <span id="lonRange">-</span></p>
+                        <p><strong>Grid Size:</strong> <span id="gridSize">-</span></p>
+                        <p><strong>Resolution:</strong> <span id="resolution">-</span></p>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Variable Selection -->
+            <div class="controls-panel">
+                <div class="control-group">
+                    <label for="variableSelect">📈 Select Variable:</label>
+                    <select id="variableSelect">
+                        <option value="">Choose a variable...</option>
+                    </select>
+                    <button id="visualizeBtn" class="action-btn" disabled>Visualize Data</button>
+                </div>
+                
+                <div class="control-group">
+                    <label for="maxPoints">🎯 Data Points (max):</label>
+                    <select id="maxPoints">
+                        <option value="10000">10,000 (Fast)</option>
+                        <option value="25000" selected>25,000 (Balanced)</option>
+                        <option value="50000">50,000 (Detailed)</option>
+                        <option value="100000">100,000 (High Detail)</option>
+                    </select>
+                </div>
+            </div>
+        </section>
+
+        <!-- Map Visualization -->
+        <section class="map-section" id="mapSection" style="display: none;">
+            <div class="map-controls">
+                <div class="control-group">
+                    <label for="opacitySlider">🎨 Opacity:</label>
+                    <input type="range" id="opacitySlider" min="0" max="1" step="0.1" value="0.7" />
+                    <span id="opacityValue">0.7</span>
+                </div>
+                
+                <div class="control-group">
+                    <label for="colorScheme">🌈 Color Scheme:</label>
+                    <select id="colorScheme">
+                        <option value="custom">Custom (Pink-Blue)</option>
+                        <option value="temperature">Temperature</option>
+                        <option value="viridis">Viridis</option>
+                        <option value="plasma">Plasma</option>
+                        <option value="precipitation">Precipitation</option>
+                        <option value="elevation">Elevation</option>
+                    </select>
+                </div>
+                
+                <div class="control-group">
+                    <button id="exportBtn" class="action-btn">💾 Export Data</button>
+                    <button id="clearBtn" class="action-btn secondary">🗑️ Clear Map</button>
+                </div>
+            </div>
+            
+            <div class="map-container">
+                <div id="map"></div>
+                <div class="map-overlay" id="loadingOverlay" style="display: none;">
+                    <div class="loading-spinner"></div>
+                    <p>Processing data...</p>
+                </div>
+            </div>
+            
+            <!-- Legend -->
+            <div class="legend" id="legend" style="display: none;">
+                <h3 id="legendTitle">Data Values</h3>
+                <div class="legend-content">
+                    <div class="color-scale" id="colorScale"></div>
+                    <div class="scale-labels" id="scaleLabels"></div>
+                </div>
+                <div class="legend-stats" id="legendStats"></div>
+            </div>
+        </section>
+
+        <!-- Status Messages -->
+        <div id="statusContainer"></div>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>

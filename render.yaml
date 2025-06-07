@@ -1,0 +1,14 @@
+# render.yaml (Render configuration)
+services:
+  - type: web
+    name: netcdf-viewer
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 18
+      - key: NODE_ENV
+        value: production
