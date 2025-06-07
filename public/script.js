@@ -1,4 +1,34 @@
-class NetCDFViewer {
+async loadFromURL() {
+        const url = prompt('Enter Zarr URL (e.g., https://example.com/data.zarr):');
+        if (!url) return;
+        
+        this.showLoadingOverlay(true);
+        
+        try {
+            const response = await fetch('/api/load-url', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ url: url })
+            });
+            
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || 'Failed to load from URL');
+            }
+            
+            const result = await response.json();
+            this.showStatus(`Successfully loaded Zarr from URL: ${url}`, 'success');
+            console.log('Zarr metadata:', result.metadata);
+            
+        } catch (error) {
+            this.showStatus('Failed to load from URL: ' + error.message, 'error');
+            console.error('URL load error:', error);
+        } finally {
+            this.showLoadingOverlay(false);
+        }
+    }class NetCDFViewer {
     constructor() {
         this.map = null;
         this.currentLayer = null;
@@ -189,16 +219,16 @@ class NetCDFViewer {
         select.innerHTML = '<option value="">Choose a variable...</option>';
         
         // Filter for variables with at least 2 dimensions (likely geographic data)
-        const geoVariables = variables.filter(v => v.dimensions.length >= 2);
+        const geoVariables = variables.filter(v => v.shape && v.shape.length >= 2);
         
         geoVariables.forEach(variable => {
             const option = document.createElement('option');
             option.value = variable.name;
             
-            const units = variable.attributes?.units || '';
-            const longName = variable.attributes?.long_name || variable.name;
+            const shapeStr = variable.shape ? `[${variable.shape.join(', ')}]` : '';
+            const dtypeStr = variable.dtype || '';
             
-            option.textContent = `${variable.name} - ${longName}${units ? ' (' + units + ')' : ''}`;
+            option.textContent = `${variable.name} ${shapeStr} (${dtypeStr})`;
             select.appendChild(option);
         });
 
@@ -280,13 +310,14 @@ class NetCDFViewer {
             });
             
             // Add popup with data info
-            const units = data.variable.attributes?.units || '';
-            const longName = data.variable.attributes?.long_name || data.variable.name;
+            const variableInfo = data.variable;
+            const variableName = variableInfo.name || 'Data';
+            const dtype = variableInfo.dtype || '';
             
             marker.bindPopup(`
                 <div style="font-family: system-ui; padding: 5px;">
-                    <strong>${longName}</strong><br>
-                    <strong>Value:</strong> ${point.value.toFixed(3)} ${units}<br>
+                    <strong>${variableName}</strong><br>
+                    <strong>Value:</strong> ${point.value.toFixed(3)} ${dtype ? '(' + dtype + ')' : ''}<br>
                     <strong>Location:</strong> ${point.lat.toFixed(3)}°, ${point.lon.toFixed(3)}°
                 </div>
             `);
@@ -355,11 +386,16 @@ class NetCDFViewer {
         const colorScheme = document.getElementById('colorScheme').value;
         const colors = this.colorSchemes[colorScheme];
         const stats = data.statistics;
-        const units = data.variable.attributes?.units || '';
-        const longName = data.variable.attributes?.long_name || data.variable.name;
+        const variableInfo = data.variable;
+        
+        // Create title from variable info
+        let title = variableInfo.name;
+        if (variableInfo.dtype) {
+            title += ` (${variableInfo.dtype})`;
+        }
         
         // Update legend title
-        document.getElementById('legendTitle').textContent = `${longName} ${units ? '(' + units + ')' : ''}`;
+        document.getElementById('legendTitle').textContent = title;
         
         // Update color scale
         const colorScale = document.getElementById('colorScale');

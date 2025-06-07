@@ -1,24 +1,20 @@
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
-const netcdf4 = require('netcdf4');
+const { openArray, slice } = require('zarr');
 const fs = require('fs');
 const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🌍 Server running on port ${PORT}`);
-});
-
 // Middleware
 app.use(cors());
-app.use(express.json({limit: '500mb'}));
-app.use(express.urlencoded({limit: '500mb', extended: true}));
+app.use(express.json({limit: '50mb'}));
+app.use(express.urlencoded({limit: '50mb', extended: true}));
 app.use(express.static('public'));
 
-// Configure multer for file uploads
+// Configure multer for Zarr file uploads (supports .zarr directories)
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, 'uploads/');
@@ -30,7 +26,17 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
   storage: storage,
-  limits: { fileSize: 500 * 1024 * 1024 } // 500MB limit
+  limits: { fileSize: 500 * 1024 * 1024 }, // 500MB limit for Zarr archives
+  fileFilter: (req, file, cb) => {
+    // Accept .zarr files (usually zip archives) and .zip files
+    if (file.mimetype === 'application/zip' || 
+        file.originalname.endsWith('.zarr') || 
+        file.originalname.endsWith('.zip')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only .zarr or .zip files are allowed'));
+    }
+  }
 });
 
 // In-memory cache for processed data
@@ -51,15 +57,17 @@ function sampleData(data, latData, lonData, maxPoints = 50000) {
       if (i === 0) sampledLons.push(lonData[j]);
       
       const dataIndex = i * lonData.length + j;
-      const value = data[dataIndex];
-      
-      // Filter out invalid values
-      if (value !== null && !isNaN(value) && Math.abs(value) < 1e30) {
-        sampledData.push({
-          lat: latData[i],
-          lon: lonData[j],
-          value: value
-        });
+      if (dataIndex < data.length) {
+        const value = data[dataIndex];
+        
+        // Filter out invalid values
+        if (value !== null && !isNaN(value) && isFinite(value)) {
+          sampledData.push({
+            lat: latData[i],
+            lon: lonData[j],
+            value: value
+          });
+        }
       }
     }
   }
@@ -72,73 +80,125 @@ function sampleData(data, latData, lonData, maxPoints = 50000) {
   };
 }
 
-// Helper function to find coordinate variables
-function findCoordinateVariables(file) {
-  const variables = Object.keys(file.root.variables);
-  
-  const latVar = variables.find(name => 
-    name.toLowerCase().includes('lat') || 
-    name.toLowerCase() === 'y' ||
-    (file.root.variables[name].attributes && 
-     file.root.variables[name].attributes.standard_name === 'latitude')
-  );
-  
-  const lonVar = variables.find(name => 
-    name.toLowerCase().includes('lon') || 
-    name.toLowerCase() === 'x' ||
-    (file.root.variables[name].attributes && 
-     file.root.variables[name].attributes.standard_name === 'longitude')
-  );
-  
-  return { latVar, lonVar };
+// Helper function to extract Zarr archive
+async function extractZarrArchive(filePath, extractPath) {
+  const AdmZip = require('adm-zip');
+  try {
+    const zip = new AdmZip(filePath);
+    zip.extractAllTo(extractPath, true);
+    return extractPath;
+  } catch (error) {
+    throw new Error('Failed to extract Zarr archive: ' + error.message);
+  }
 }
 
-// API Routes
+// Helper function to find coordinate arrays in Zarr
+async function findCoordinateArrays(zarrPath) {
+  try {
+    // Common coordinate variable names
+    const coordNames = ['latitude', 'lat', 'longitude', 'lon', 'x', 'y'];
+    const coordinates = {};
+    
+    for (const name of coordNames) {
+      try {
+        const coordPath = path.join(zarrPath, name);
+        if (fs.existsSync(coordPath)) {
+          const coordArray = await openArray(coordPath);
+          if (name.toLowerCase().includes('lat') || name.toLowerCase() === 'y') {
+            coordinates.latitude = { name, array: coordArray };
+          } else if (name.toLowerCase().includes('lon') || name.toLowerCase() === 'x') {
+            coordinates.longitude = { name, array: coordArray };
+          }
+        }
+      } catch (e) {
+        // Continue searching if this coordinate doesn't exist
+        continue;
+      }
+    }
+    
+    return coordinates;
+  } catch (error) {
+    throw new Error('Failed to find coordinate arrays: ' + error.message);
+  }
+}
 
-// Upload and analyze netCDF file
-app.post('/api/upload', upload.single('netcdf'), async (req, res) => {
+// Upload and analyze Zarr file
+app.post('/api/upload', upload.single('zarr'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
     const filePath = req.file.path;
+    const fileId = req.file.filename;
+    const extractPath = path.join('uploads', `extracted_${fileId}`);
     
-    // Open NetCDF4 file
-    const file = new netcdf4.File(filePath, 'r');
-    
-    // Extract file information
-    const dimensions = Object.keys(file.root.dimensions).map(name => ({
-      name: name,
-      size: file.root.dimensions[name].length
-    }));
-    
-    const variables = Object.keys(file.root.variables).map(name => {
-      const variable = file.root.variables[name];
-      return {
-        name: name,
-        dimensions: variable.dimensions.map(d => d.name),
-        attributes: variable.attributes || {},
-        type: variable.type
-      };
-    });
-    
-    // Find coordinate variables
-    const { latVar, lonVar } = findCoordinateVariables(file);
-    
-    let coordinates = null;
-    if (latVar && lonVar) {
-      const latData = file.root.variables[latVar].read();
-      const lonData = file.root.variables[lonVar].read();
+    // Extract Zarr archive if it's zipped
+    let zarrPath;
+    if (req.file.originalname.endsWith('.zip') || req.file.originalname.endsWith('.zarr')) {
+      zarrPath = await extractZarrArchive(filePath, extractPath);
       
-      coordinates = {
+      // Find the actual Zarr directory inside the extracted folder
+      const files = fs.readdirSync(zarrPath);
+      const zarrDir = files.find(f => f.endsWith('.zarr') || fs.statSync(path.join(zarrPath, f)).isDirectory());
+      if (zarrDir) {
+        zarrPath = path.join(zarrPath, zarrDir);
+      }
+    } else {
+      zarrPath = filePath;
+    }
+
+    // Find coordinate arrays
+    const coordinates = await findCoordinateArrays(zarrPath);
+    
+    // Get dimensions and variables by exploring the Zarr structure
+    const zarrContents = fs.readdirSync(zarrPath);
+    const variables = [];
+    const dimensions = [];
+    
+    for (const item of zarrContents) {
+      const itemPath = path.join(zarrPath, item);
+      if (fs.statSync(itemPath).isDirectory() && !item.startsWith('.')) {
+        try {
+          const array = await openArray(itemPath);
+          const meta = array.meta;
+          
+          variables.push({
+            name: item,
+            shape: meta.shape,
+            dtype: meta.dtype,
+            chunks: meta.chunks,
+            dimensions: meta.shape.map((size, idx) => `dim_${idx}`)
+          });
+          
+          // Add dimensions
+          meta.shape.forEach((size, idx) => {
+            const dimName = `dim_${idx}`;
+            if (!dimensions.find(d => d.name === dimName)) {
+              dimensions.push({ name: dimName, size });
+            }
+          });
+        } catch (e) {
+          // Skip non-array directories
+          continue;
+        }
+      }
+    }
+    
+    // Get coordinate data if available
+    let coordinateInfo = null;
+    if (coordinates.latitude && coordinates.longitude) {
+      const latData = await coordinates.latitude.array.get();
+      const lonData = await coordinates.longitude.array.get();
+      
+      coordinateInfo = {
         latitude: {
-          name: latVar,
+          name: coordinates.latitude.name,
           range: [Math.min(...latData), Math.max(...latData)],
           size: latData.length
         },
         longitude: {
-          name: lonVar,
+          name: coordinates.longitude.name,
           range: [Math.min(...lonData), Math.max(...lonData)],
           size: lonData.length
         }
@@ -146,11 +206,12 @@ app.post('/api/upload', upload.single('netcdf'), async (req, res) => {
     }
     
     // Store file info in cache
-    const fileId = req.file.filename;
     dataCache.set(fileId, {
-      file: file,
+      zarrPath: zarrPath,
       filePath: filePath,
-      coordinates: coordinates
+      extractPath: extractPath,
+      coordinates: coordinates,
+      coordinateInfo: coordinateInfo
     });
     
     res.json({
@@ -159,16 +220,17 @@ app.post('/api/upload', upload.single('netcdf'), async (req, res) => {
       size: req.file.size,
       dimensions: dimensions,
       variables: variables,
-      coordinates: coordinates
+      coordinates: coordinateInfo,
+      format: 'Zarr'
     });
     
   } catch (error) {
     console.error('Upload error:', error);
-    res.status(500).json({ error: 'Failed to process netCDF file: ' + error.message });
+    res.status(500).json({ error: 'Failed to process Zarr file: ' + error.message });
   }
 });
 
-// Get variable data
+// Get variable data from Zarr
 app.get('/api/data/:fileId/:variableName', async (req, res) => {
   try {
     const { fileId, variableName } = req.params;
@@ -179,50 +241,49 @@ app.get('/api/data/:fileId/:variableName', async (req, res) => {
       return res.status(404).json({ error: 'File not found' });
     }
     
-    const { file, coordinates } = cachedData;
+    const { zarrPath, coordinates, coordinateInfo } = cachedData;
     
-    // Check if variable exists
-    if (!file.root.variables[variableName]) {
+    // Open the variable array
+    const variablePath = path.join(zarrPath, variableName);
+    if (!fs.existsSync(variablePath)) {
       return res.status(404).json({ error: 'Variable not found' });
     }
     
-    // Get variable data
-    const variable = file.root.variables[variableName];
-    
-    // For multi-dimensional data, we need to handle slicing
-    let data;
-    if (variable.dimensions.length === 3) {
-      // Assume format: [time, lat, lon] - take first time slice
-      data = variable.readSlice(0, null, null);
-    } else if (variable.dimensions.length === 2) {
-      // Format: [lat, lon]
-      data = variable.read();
-    } else {
-      return res.status(400).json({ error: 'Unsupported variable dimensions' });
-    }
+    const dataArray = await openArray(variablePath);
+    const meta = dataArray.meta;
     
     // Get coordinate data
-    if (!coordinates) {
-      return res.status(400).json({ error: 'Coordinate variables not found' });
+    if (!coordinates.latitude || !coordinates.longitude) {
+      return res.status(400).json({ error: 'Coordinate arrays not found' });
     }
     
-    const latData = file.root.variables[coordinates.latitude.name].read();
-    const lonData = file.root.variables[coordinates.longitude.name].read();
+    const latData = await coordinates.latitude.array.get();
+    const lonData = await coordinates.longitude.array.get();
     
-    // Flatten the data array if it's 2D
-    let flatData;
-    if (Array.isArray(data[0])) {
-      flatData = data.flat();
+    // Handle multi-dimensional data (take first time slice if needed)
+    let data;
+    if (meta.shape.length === 3) {
+      // Assume [time, lat, lon] format - take first time slice
+      data = await dataArray.get([0, slice(null), slice(null)]);
+      data = data.flat(); // Flatten 2D array to 1D
+    } else if (meta.shape.length === 2) {
+      // [lat, lon] format
+      data = await dataArray.get();
+      data = data.flat(); // Flatten 2D array to 1D
     } else {
-      flatData = data;
+      return res.status(400).json({ error: 'Unsupported data dimensions' });
     }
     
     // Sample data for performance
-    const sampledResult = sampleData(flatData, latData, lonData, maxPoints);
+    const sampledResult = sampleData(data, latData, lonData, maxPoints);
     
     // Calculate statistics
     const values = sampledResult.data.map(d => d.value);
     const validValues = values.filter(v => v !== null && !isNaN(v) && isFinite(v));
+    
+    if (validValues.length === 0) {
+      return res.status(400).json({ error: 'No valid data points found' });
+    }
     
     const stats = {
       min: Math.min(...validValues),
@@ -236,8 +297,9 @@ app.get('/api/data/:fileId/:variableName', async (req, res) => {
     res.json({
       variable: {
         name: variableName,
-        attributes: variable.attributes || {},
-        dimensions: variable.dimensions.map(d => d.name)
+        shape: meta.shape,
+        dtype: meta.dtype,
+        chunks: meta.chunks
       },
       data: sampledResult.data,
       coordinates: {
@@ -253,55 +315,54 @@ app.get('/api/data/:fileId/:variableName', async (req, res) => {
   }
 });
 
-// Get variable metadata only
-app.get('/api/variable/:fileId/:variableName/info', (req, res) => {
+// Load Zarr from URL (for cloud-hosted data)
+app.post('/api/load-url', async (req, res) => {
   try {
-    const { fileId, variableName } = req.params;
+    const { url, variable } = req.body;
     
-    const cachedData = dataCache.get(fileId);
-    if (!cachedData) {
-      return res.status(404).json({ error: 'File not found' });
+    if (!url) {
+      return res.status(400).json({ error: 'URL is required' });
     }
     
-    const { file } = cachedData;
-    const variable = file.root.variables[variableName];
+    // Open Zarr array from URL
+    const dataArray = await openArray(url);
+    const meta = dataArray.meta;
     
-    if (!variable) {
-      return res.status(404).json({ error: 'Variable not found' });
-    }
+    // For demo, get a small chunk
+    const chunkSize = 100;
+    const data = await dataArray.get([
+      slice(0, 1), // First time slice if 3D
+      slice(0, chunkSize), 
+      slice(0, chunkSize)
+    ]);
     
     res.json({
-      name: variableName,
-      dimensions: variable.dimensions.map(d => d.name),
-      attributes: variable.attributes || {},
-      type: variable.type
+      metadata: meta,
+      sampleData: data,
+      message: 'Successfully loaded Zarr from URL'
     });
     
   } catch (error) {
-    console.error('Variable info error:', error);
-    res.status(500).json({ error: 'Failed to get variable info: ' + error.message });
+    console.error('URL load error:', error);
+    res.status(500).json({ error: 'Failed to load Zarr from URL: ' + error.message });
   }
 });
 
-// Delete uploaded file
+// Delete uploaded files
 app.delete('/api/file/:fileId', (req, res) => {
   try {
     const { fileId } = req.params;
     
     const cachedData = dataCache.get(fileId);
     if (cachedData) {
-      // Close netCDF file
-      if (cachedData.file) {
-        try {
-          cachedData.file.close();
-        } catch (e) {
-          console.warn('Warning: Could not close netCDF file:', e.message);
-        }
-      }
-      
-      // Delete file from disk
+      // Delete original file
       if (fs.existsSync(cachedData.filePath)) {
         fs.unlinkSync(cachedData.filePath);
+      }
+      
+      // Delete extracted directory
+      if (cachedData.extractPath && fs.existsSync(cachedData.extractPath)) {
+        fs.rmSync(cachedData.extractPath, { recursive: true, force: true });
       }
       
       // Remove from cache
@@ -321,27 +382,17 @@ app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     timestamp: new Date().toISOString(),
-    activeFiles: dataCache.size
+    activeFiles: dataCache.size,
+    version: 'Zarr-powered'
   });
 });
 
-// Error handling middleware
-app.use((error, req, res, next) => {
-  if (error instanceof multer.MulterError) {
-    if (error.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ error: 'File too large' });
-    }
-  }
-  
-  console.error('Server error:', error);
-  res.status(500).json({ error: 'Internal server error' });
-});
-
 // Start server
-app.listen(PORT, () => {
-  console.log(`🌍 NetCDF Viewer Server running on http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🌍 NetCDF Viewer Server (Zarr-powered) running on port ${PORT}`);
   console.log('📁 Upload directory: ./uploads/');
-  console.log('🌐 Frontend: http://localhost:' + PORT);
+  console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log('⚡ Zarr format supported for high-performance data loading');
   
   // Create uploads directory if it doesn't exist
   if (!fs.existsSync('uploads')) {
@@ -356,18 +407,14 @@ process.on('SIGTERM', () => {
   
   // Clean up cache and temp files
   for (const [fileId, data] of dataCache) {
-    // Close netCDF files
-    if (data.file) {
-      try {
-        data.file.close();
-      } catch (e) {
-        console.warn('Warning: Could not close netCDF file:', e.message);
-      }
-    }
-    
     // Delete temp files
     if (fs.existsSync(data.filePath)) {
       fs.unlinkSync(data.filePath);
+    }
+    
+    // Delete extracted directories
+    if (data.extractPath && fs.existsSync(data.extractPath)) {
+      fs.rmSync(data.extractPath, { recursive: true, force: true });
     }
   }
   
